@@ -680,6 +680,7 @@ impl StructureState {
                 .find(|s| wanted(s.structure) && !skip(&s.name, chunk))
                 .map(|s| s.name.clone())
         };
+        let mut spaced_sets = Vec::new();
         for &si in &self.possible_sets {
             let set = &self.registry.sets[si];
             if !set.structures.iter().any(|(s, _)| wanted(*s)) {
@@ -712,36 +713,64 @@ impl StructureState {
                     }
                 }
                 Some(spacing) => {
-                    let (cx, cz) = (from[0] >> 4, from[2] >> 4);
-                    'search: for r in 0..=radius {
-                        for dx in -r..=r {
-                            let x_edge = dx == -r || dx == r;
-                            for dz in -r..=r {
-                                if !(x_edge || dz == -r || dz == r) {
-                                    continue;
-                                }
-                                let (sx, sz) = (cx + spacing * dx, cz + spacing * dz);
-                                let Some(c) = StructureRegistry::potential_chunk(set, seed, sx, sz)
-                                else {
-                                    continue;
-                                };
-                                if !self
-                                    .registry
-                                    .is_structure_chunk(set, seed, c.x, c.z, &rings)
-                                {
-                                    continue;
-                                }
-                                if let Some(name) = found_at(self, context, c) {
-                                    let p = set.locate_pos(c);
-                                    let d = dist(p);
-                                    if best.as_ref().is_none_or(|(b, ..)| d < *b) {
-                                        best = Some((d, name, p));
-                                    }
-                                    break 'search;
+                    spaced_sets.push((si, spacing));
+                }
+            }
+        }
+        if !spaced_sets.is_empty() {
+            let (cx, cz) = (from[0] >> 4, from[2] >> 4);
+            for r in 0..=radius {
+                spaced_sets.retain(|&(_, spacing)| {
+                    if let Some((best_d, ..)) = best {
+                        let min_chunk_dist = (r - 1).max(0) * spacing;
+                        let min_block_dist = f64::from(min_chunk_dist * 16);
+                        min_block_dist * min_block_dist < best_d
+                    } else {
+                        true
+                    }
+                });
+                if spaced_sets.is_empty() {
+                    break;
+                }
+                let mut found_sets = Vec::new();
+                for (idx, &(si, spacing)) in spaced_sets.iter().enumerate() {
+                    let set = &self.registry.sets[si];
+                    let mut set_best: Option<(f64, String, [i32; 3])> = None;
+                    for dx in -r..=r {
+                        let x_edge = dx == -r || dx == r;
+                        for dz in -r..=r {
+                            if !(x_edge || dz == -r || dz == r) {
+                                continue;
+                            }
+                            let (sx, sz) = (cx + spacing * dx, cz + spacing * dz);
+                            let Some(c) = StructureRegistry::potential_chunk(set, seed, sx, sz)
+                            else {
+                                continue;
+                            };
+                            if !self
+                                .registry
+                                .is_structure_chunk(set, seed, c.x, c.z, &rings)
+                            {
+                                continue;
+                            }
+                            if let Some(name) = found_at(self, context, c) {
+                                let p = set.locate_pos(c);
+                                let d = dist(p);
+                                if set_best.as_ref().is_none_or(|(b, ..)| d < *b) {
+                                    set_best = Some((d, name, p));
                                 }
                             }
                         }
                     }
+                    if let Some(found) = set_best {
+                        found_sets.push(idx);
+                        if best.as_ref().is_none_or(|(b, ..)| found.0 < *b) {
+                            best = Some(found);
+                        }
+                    }
+                }
+                for &idx in found_sets.iter().rev() {
+                    spaced_sets.swap_remove(idx);
                 }
             }
         }

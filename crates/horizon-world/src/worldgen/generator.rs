@@ -2808,13 +2808,14 @@ where
             search.max_y + 1,
             search.vertical,
         );
+        worker.biome_context.clear_caches();
         let radius = search.radius.div_euclid(search.horizontal);
         for [sx, sz] in spiral_around(radius) {
             let x = search.origin[0].wrapping_add(sx.wrapping_mul(search.horizontal));
             let z = search.origin[2].wrapping_add(sz.wrapping_mul(search.horizontal));
             for &y in &ys {
                 let quart = [x >> 2, y >> 2, z >> 2];
-                let Ok(name) = resolver.sample(&mut worker.carver_context, quart) else {
+                let Ok(name) = resolver.sample(&mut worker.biome_context, quart) else {
                     continue;
                 };
                 if candidates.contains(name) {

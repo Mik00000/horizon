@@ -41,8 +41,6 @@ pub struct VanillaTerrain {
     /// Loot tables for generated containers.
     loot: Option<Arc<horizon_world::loot::LootData>>,
     structure_mobs: Arc<StructureMobFinalizer>,
-    /// A worker for structure queries from the game thread.
-    query: std::sync::Mutex<Option<GeneratorWorker>>,
     /// Block state id -> block index, the game's block tick type: worldgen
     /// schedules block ticks by default state id.
     tick_blocks: Vec<u32>,
@@ -332,7 +330,6 @@ impl VanillaTerrain {
                 dir.parent().unwrap_or(dir).to_owned(),
                 dimension,
             )),
-            query: std::sync::Mutex::new(None),
             tick_blocks,
             tick_states,
             block_entity_types,
@@ -483,15 +480,30 @@ impl VanillaTerrain {
         }
         out
     }
+    fn with_worker<R>(&self, f: impl FnOnce(&mut GeneratorWorker) -> R) -> R {
+        thread_local! {
+            static WORKER: std::cell::RefCell<Option<(usize, GeneratorWorker)>> = const { std::cell::RefCell::new(None) };
+        }
+        let gen_ptr = &self.generator as *const _ as usize;
+        WORKER.with(|cell| {
+            let Ok(mut guard) = cell.try_borrow_mut() else {
+                let mut fallback = self.generator.worker();
+                return f(&mut fallback);
+            };
+            let entry = guard.get_or_insert_with(|| (gen_ptr, self.generator.worker()));
+            if entry.0 != gen_ptr {
+                *entry = (gen_ptr, self.generator.worker());
+            }
+            f(&mut entry.1)
+        })
+    }
     /// The structure starts owned by a chunk (cached by the generator).
     pub fn starts_at(
         &self,
         x: i32,
         z: i32,
     ) -> Vec<Arc<horizon_world::worldgen::structure::start::StructureStart>> {
-        let mut worker = self.query.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = worker.get_or_insert_with(|| self.generator.worker());
-        worker.structure_starts(ChunkPos::new(x, z))
+        self.with_worker(|w| w.structure_starts(ChunkPos::new(x, z)))
     }
     /// `/place structure`: `Structure.generate` for `structure` in chunk
     /// `(x, z)`, whatever the chunk's structure sets place there.
@@ -501,9 +513,7 @@ impl VanillaTerrain {
         x: i32,
         z: i32,
     ) -> Option<Arc<horizon_world::worldgen::structure::start::StructureStart>> {
-        let mut worker = self.query.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = worker.get_or_insert_with(|| self.generator.worker());
-        worker.structure_start(structure, ChunkPos::new(x, z))
+        self.with_worker(|w| w.structure_start(structure, ChunkPos::new(x, z)))
     }
     /// `/locate structure`: the nearest start of one of `names` within
     /// `radius` placement sectors of block `from`.
@@ -513,7 +523,7 @@ impl VanillaTerrain {
         from: [i32; 3],
         radius: i32,
     ) -> Option<(String, [i32; 3])> {
-        self.generator.worker().locate(names, from, radius)
+        self.with_worker(|w| w.locate(names, from, radius))
     }
     /// The chunks an older version saved, which new chunks blend with
     /// (`Blender.of`).
@@ -550,15 +560,14 @@ impl VanillaTerrain {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let mut referenced = self.referenced.lock().unwrap_or_else(|e| e.into_inner());
-        let found =
-            self.generator
-                .worker()
-                .locate_skipping(names, from, radius, &|name, chunk| {
-                    referenced.contains(&(name.to_owned(), chunk.x, chunk.z))
-                        || saved
-                            .as_ref()
-                            .is_some_and(|f| f(name, chunk.x, chunk.z) > 0)
-                })?;
+        let found = self.with_worker(|w| {
+            w.locate_skipping(names, from, radius, &|name, chunk| {
+                referenced.contains(&(name.to_owned(), chunk.x, chunk.z))
+                    || saved
+                        .as_ref()
+                        .is_some_and(|f| f(name, chunk.x, chunk.z) > 0)
+            })
+        })?;
         referenced.insert((found.0.clone(), found.1[0] >> 4, found.1[2] >> 4));
         self.save_references(&referenced);
         Some(found)
@@ -615,25 +624,19 @@ impl VanillaTerrain {
         &self,
         search: &horizon_world::worldgen::generator::BiomeSearch<'_>,
     ) -> Option<(String, [i32; 3])> {
-        let mut worker = self.query.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = worker.get_or_insert_with(|| self.generator.worker());
-        worker.find_closest_biome(search)
+        self.with_worker(|w| w.find_closest_biome(search))
     }
     /// `BiomeSource.getNoiseBiome` at quart positions, for places that may not
     /// be generated yet (`MapItem.renderBiomePreviewMap`).
     pub fn noise_biomes(&self, quarts: &[[i32; 3]]) -> Vec<Option<String>> {
-        let mut worker = self.query.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = worker.get_or_insert_with(|| self.generator.worker());
-        worker.noise_biomes(quarts)
+        self.with_worker(|w| w.noise_biomes(quarts))
     }
     /// `/place jigsaw`: `JigsawPlacement.addPieces`.
     pub fn jigsaw_pieces(
         &self,
         query: &horizon_world::worldgen::generator::JigsawQuery<'_>,
     ) -> Option<horizon_world::worldgen::generator::JigsawPieces> {
-        let mut worker = self.query.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = worker.get_or_insert_with(|| self.generator.worker());
-        worker.jigsaw_pieces(query)
+        self.with_worker(|w| w.jigsaw_pieces(query))
     }
     /// NoiseBasedChunkGenerator.getOrigin: where the world spawn search starts.
     pub fn origin(&self) -> crate::Result<ChunkPos> {
@@ -642,9 +645,7 @@ impl VanillaTerrain {
     /// Concentric ring positions of a structure set (strongholds), searched
     /// for now if no chunk needed them yet.
     pub fn ring_positions(&self, set: &str) -> Option<Vec<ChunkPos>> {
-        let mut worker = self.query.lock().unwrap_or_else(|e| e.into_inner());
-        let worker = worker.get_or_insert_with(|| self.generator.worker());
-        worker.ring_positions(set)
+        self.with_worker(|w| w.ring_positions(set))
     }
     /// Searches the concentric rings on a thread of their own, as vanilla's
     /// background executor does, once generation pauses for two seconds
