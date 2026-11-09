@@ -50,7 +50,7 @@ fn shape_tag(shape: &VoxelShape) -> Tag {
 const TNT: u32 = 20;
 struct Rules<'o> {
     mob_griefing: bool,
-    owners: &'o dyn OwnerLookup,
+    owners: &'o (dyn OwnerLookup + Sync),
     server: bool,
 }
 const CLIENT: Rules<'static> = Rules {

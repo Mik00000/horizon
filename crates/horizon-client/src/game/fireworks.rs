@@ -700,12 +700,8 @@ impl Game<'_> {
         let from = r.position;
         let mut to = from.add_vector(motion);
         let w = self.mob_world_base(&[]);
-        let block = (super::creatures::ProjWorld {
-            w: &w,
-            targets: Vec::new(),
-            border: Some(self.border.bounds()),
-        })
-        .clip(from, to);
+        let block = (super::creatures::ProjWorld::new(&w, Vec::new(), Some(self.border.bounds())))
+            .clip(from, to);
         if let Some((at, ..)) = block {
             to = at;
         }

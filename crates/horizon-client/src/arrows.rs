@@ -334,14 +334,14 @@ pub struct ArrowScene<'a, 'r> {
     pub collision: &'a BlockCollisionRegistry<'r>,
     pub fluids: &'a FluidResources,
     /// `Level.isRainingAt`.
-    pub raining: &'a dyn Fn(BlockPos) -> bool,
+    pub raining: &'a (dyn Fn(BlockPos) -> bool + Sync),
     /// The `mob_griefing` and `tnt_explodes` game rules.
     pub mob_griefing: bool,
     pub tnt_explodes: bool,
-    pub owners: &'a dyn OwnerLookup,
+    pub owners: &'a (dyn OwnerLookup + Sync),
 }
 /// `EntityReference.getEntity` for an owner the arrow only knows by UUID.
-pub trait OwnerLookup {
+pub trait OwnerLookup: Sync {
     /// A loaded entity other than a player has this UUID.
     fn non_player_entity(&self, uuid: [i32; 4]) -> bool;
 }

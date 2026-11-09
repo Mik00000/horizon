@@ -699,11 +699,8 @@ impl Game<'_> {
         let arrow_scene = self.arrow_scene(&rain);
         {
             let w = self.mob_world_base(&[]);
-            let world = super::creatures::ProjWorld {
-                w: &w,
-                targets: Vec::new(),
-                border: Some(self.border.bounds()),
-            };
+            let world =
+                super::creatures::ProjWorld::new(&w, Vec::new(), Some(self.border.bounds()));
             for p in &mut projectiles {
                 match p.kind {
                     ProjectileKind::Arrow { .. } => {
