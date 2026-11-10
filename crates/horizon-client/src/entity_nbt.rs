@@ -3896,7 +3896,7 @@ pub fn armor_stand_to_nbt(a: &ArmorStand, uuid: [i32; 4], raw: Option<&Tag>) -> 
 /// The attribute every living entity's first tick makes (`removeFrost`).
 const SPEED_ATTRIBUTE: &str = "minecraft:movement_speed";
 pub fn armor_stand_from_nbt(tag: &Tag, id: u32) -> Option<ArmorStand> {
-    let mut a = ArmorStand::new(id, position(tag)?, rotation(tag)[0]);
+    let mut a = ArmorStand::from_rotation(id, position(tag)?, rotation(tag));
     a.enchantment_fall_distance = float(tag.get("fall_distance")).unwrap_or(0.0);
     // AttributeMap.load makes an instance for each saved attribute.
     a.speed_instance = matches!(tag.get("attributes"), Some(Tag::List(list))
@@ -9503,6 +9503,36 @@ mod stand_fall_save_tests {
                     assert_eq!(saved.get("Pos"), input.get("Pos"));
                     assert_eq!(stand.no_gravity, no_gravity);
                 }
+            }
+        }
+    }
+
+    /// Armor stand preserves its saved pitch (Rotation[1]) on load and save (#14799).
+    #[test]
+    fn armor_stand_pitch_survives_save_and_load_roundtrip() {
+        let stale = Tag::compound([("Rotation", floats(&[0.0, 0.0]))]);
+        for (yaw, pitch) in [
+            (0.0_f32, 0.0_f32),
+            (45.0, -30.0),
+            (180.0, 90.0),
+            (-90.0, -45.5),
+            (210.0, 15.0),
+        ] {
+            let input = Tag::compound([
+                ("Pos", doubles(&[10.5, 64.0, -5.5])),
+                ("Rotation", floats(&[yaw, pitch])),
+            ]);
+            let stand = armor_stand_from_nbt(&input, 1).expect("valid armor stand");
+            assert_eq!(stand.yaw, yaw);
+            assert_eq!(stand.pitch, pitch);
+
+            for raw in [None, Some(&stale)] {
+                let saved = armor_stand_to_nbt(&stand, [1, 2, 3, 4], raw);
+                assert_eq!(rotation(&saved), [yaw, pitch]);
+
+                let restored = armor_stand_from_nbt(&saved, 2).expect("valid saved stand");
+                assert_eq!(restored.yaw, yaw);
+                assert_eq!(restored.pitch, pitch);
             }
         }
     }

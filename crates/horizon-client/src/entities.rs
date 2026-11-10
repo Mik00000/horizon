@@ -2328,10 +2328,10 @@ impl ArmorStand {
         self.yaw = yaw;
         self.previous_yaw = yaw;
     }
-    pub fn new(id: u32, position: Vec3, yaw: f32) -> Self {
+    pub fn with_rotation(id: u32, position: Vec3, yaw: f32, pitch: f32) -> Self {
         Self {
             first_tick: true,
-            pitch: 0.0,
+            pitch,
             join: Default::default(),
             fire_ticks: 0,
             health: 20.0,
@@ -2361,6 +2361,16 @@ impl ArmorStand {
             support: Default::default(),
             speed_instance: false,
         }
+    }
+    pub fn from_rotation(id: u32, position: Vec3, [yaw, pitch]: [f32; 2]) -> Self {
+        Self::with_rotation(id, position, yaw, pitch)
+    }
+    pub fn with_pitch(mut self, pitch: f32) -> Self {
+        self.pitch = pitch;
+        self
+    }
+    pub fn new(id: u32, position: Vec3, yaw: f32) -> Self {
+        Self::with_rotation(id, position, yaw, 0.0)
     }
     /// `Entity.getOnPos(0.2)` (`getOnPosLegacy`): the supporting block's
     /// column 0.2 below the feet, the supporting block itself when `tall`
@@ -3009,6 +3019,21 @@ mod armor_stand_render_tests {
         stand.snap(Vec3::new(200.5, 64.0, 0.5), 90.0);
         assert_eq!(stand.render_position(0.5), Vec3::new(200.5, 64.0, 0.5));
         assert_eq!(stand.render_yaw(0.5), 90.0);
+    }
+
+    #[test]
+    fn armor_stand_pitch_initialized_and_preserved() {
+        let stand = ArmorStand::with_rotation(1, Vec3::new(1.0, 2.0, 3.0), 45.0, -15.0);
+        assert_eq!(stand.yaw, 45.0);
+        assert_eq!(stand.pitch, -15.0);
+
+        let stand2 = ArmorStand::from_rotation(2, Vec3::new(1.0, 2.0, 3.0), [90.0, 30.0]);
+        assert_eq!(stand2.yaw, 90.0);
+        assert_eq!(stand2.pitch, 30.0);
+
+        let stand3 = ArmorStand::new(3, Vec3::ZERO, 180.0).with_pitch(-45.0);
+        assert_eq!(stand3.yaw, 180.0);
+        assert_eq!(stand3.pitch, -45.0);
     }
 }
 #[cfg(test)]
