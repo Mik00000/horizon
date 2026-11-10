@@ -251,6 +251,13 @@ impl RegionStorageUpgrader {
             Ok(pool) => pool.install(work),
             Err(_) => work(),
         }
+        if !self.progress.is_canceled() {
+            this.progress
+                .set_dimension_progress(&this.dimension, 1.0);
+            this.progress.set_total_progress(
+                (this.start_index as usize + files.len()) as f32 / total_size,
+            );
+        }
         self.progress.set_status(UpgradeStatus::Finished);
         self.close();
     }

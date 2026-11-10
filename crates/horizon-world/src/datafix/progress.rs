@@ -175,8 +175,12 @@ impl UpgradeProgress {
         f32::from_bits(self.total_progress.load(Ordering::Relaxed))
     }
     pub fn set_total_progress(&self, progress: f32) {
+        let new_bits = progress.to_bits();
         self.total_progress
-            .store(progress.to_bits(), Ordering::Relaxed);
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                (progress > f32::from_bits(cur)).then_some(new_bits)
+            })
+            .ok();
     }
     pub fn total_chunks(&self) -> i32 {
         self.total_chunks.load(Ordering::Relaxed)
@@ -198,7 +202,8 @@ impl UpgradeProgress {
     }
     pub fn set_dimension_progress(&self, dimension: &str, progress: f32) {
         if let Ok(mut map) = self.dimension_progress.lock() {
-            map.insert(dimension.to_owned(), progress);
+            let entry = map.entry(dimension.to_owned()).or_insert(0.0);
+            *entry = entry.max(progress);
         }
     }
     /// `getDimensionProgress`: 0 for a dimension nothing was reported for.
