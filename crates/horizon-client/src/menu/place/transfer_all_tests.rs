@@ -126,3 +126,110 @@ fn a_transfer_of_all_fills_as_many_sets_as_the_items_allow() {
         assert_eq!(station.sources, vec![vec![stack("oak_planks", 2)]]);
     });
 }
+
+/// A viewer's transfer moves worn, enchanted or renamed tools that match the recipe
+/// ingredients (#14652), while the vanilla recipe book skips them (`PostPlace::Ghost`).
+#[test]
+fn recipe_viewer_transfer_allows_worn_enchanted_and_renamed_tools() {
+    // 1. Worn fishing rod (damage > 0) with a carrot into carrot_on_a_stick
+    with_menu(Kind::Inventory, |env, menu| {
+        let mut rod = stack("fishing_rod", 1).unwrap();
+        rod.damage = 25;
+        menu.set_player_item(0, Some(rod));
+        menu.set_player_item(1, stack("carrot", 1));
+
+        // Recipe book skips worn tool: leaves grid untouched and returns Ghost
+        let placed = menu.place_recipe(env, "minecraft:carrot_on_a_stick", false, false, None);
+        assert_eq!(placed, crate::menu::place::PostPlace::Ghost);
+        assert_eq!(menu.slot(1), None);
+        assert_eq!(menu.slot(4), None);
+
+        // Recipe viewer transfer succeeds with worn tool
+        assert_eq!(
+            menu.transfer_recipe(env, "minecraft:carrot_on_a_stick", false),
+            Ok(())
+        );
+        let rod_slot = menu.slot(1).map(|s| (s.item.to_string(), s.damage));
+        let carrot_slot = menu.slot(4).map(|s| (s.item.to_string(), s.count));
+        assert_eq!(rod_slot, Some(("minecraft:fishing_rod".to_string(), 25)));
+        assert_eq!(carrot_slot, Some(("minecraft:carrot".to_string(), 1)));
+        assert_eq!(
+            menu.slot(0).map(|s| s.item.to_string()),
+            Some("minecraft:carrot_on_a_stick".to_string())
+        );
+    });
+
+    // 2. Enchanted fishing rod with a carrot
+    with_menu(Kind::Inventory, |env, menu| {
+        let mut rod = stack("fishing_rod", 1).unwrap();
+        rod.data_mut().enchantments = vec![("minecraft:unbreaking".into(), 2)];
+        menu.set_player_item(0, Some(rod));
+        menu.set_player_item(1, stack("carrot", 1));
+
+        // Recipe book skips enchanted tool
+        let placed = menu.place_recipe(env, "minecraft:carrot_on_a_stick", false, false, None);
+        assert_eq!(placed, crate::menu::place::PostPlace::Ghost);
+        assert_eq!(menu.slot(1), None);
+        assert_eq!(menu.slot(4), None);
+
+        // Recipe viewer transfer accepts enchanted tool
+        assert_eq!(
+            menu.transfer_recipe(env, "minecraft:carrot_on_a_stick", false),
+            Ok(())
+        );
+        assert!(menu.slot(1).is_some_and(|s| s.enchantments().len() == 1));
+        assert_eq!(
+            menu.slot(0).map(|s| s.item.to_string()),
+            Some("minecraft:carrot_on_a_stick".to_string())
+        );
+    });
+
+    // 3. Renamed fishing rod with a carrot
+    with_menu(Kind::Inventory, |env, menu| {
+        let mut rod = stack("fishing_rod", 1).unwrap();
+        rod.data_mut().custom_name = Some(horizon_world::nbt::Tag::String("Old Rod".into()));
+        menu.set_player_item(0, Some(rod));
+        menu.set_player_item(1, stack("carrot", 1));
+
+        // Recipe book skips renamed tool
+        let placed = menu.place_recipe(env, "minecraft:carrot_on_a_stick", false, false, None);
+        assert_eq!(placed, crate::menu::place::PostPlace::Ghost);
+        assert_eq!(menu.slot(1), None);
+        assert_eq!(menu.slot(4), None);
+
+        // Recipe viewer transfer accepts renamed tool
+        assert_eq!(
+            menu.transfer_recipe(env, "minecraft:carrot_on_a_stick", false),
+            Ok(())
+        );
+        assert_eq!(
+            menu.slot(1).and_then(|s| s.custom_name()),
+            Some("Old Rod".to_string())
+        );
+        assert_eq!(
+            menu.slot(0).map(|s| s.item.to_string()),
+            Some("minecraft:carrot_on_a_stick".to_string())
+        );
+    });
+
+    // 4. Transfer with `all = true` also works with worn tools
+    with_menu(Kind::Crafting, |env, menu| {
+        let mut rod = stack("fishing_rod", 1).unwrap();
+        rod.damage = 10;
+        menu.set_player_item(0, Some(rod));
+        menu.set_player_item(1, stack("carrot", 5));
+
+        assert_eq!(
+            menu.transfer_recipe(env, "minecraft:carrot_on_a_stick", true),
+            Ok(())
+        );
+        assert!(menu.slot(1).is_some_and(|s| s.damage == 10 && s.count == 1));
+        assert_eq!(menu.slot(5).map(|s| s.count), Some(1));
+        assert_eq!(
+            menu.slot(0).map(|s| s.item.to_string()),
+            Some("minecraft:carrot_on_a_stick".to_string())
+        );
+        // Remaining carrots in inventory
+        assert_eq!(menu.player_item(1).map(|s| s.count), Some(4));
+    });
+}
