@@ -6913,7 +6913,7 @@ impl Game<'_> {
             fluids.clear();
             fluids.extend(self.mobs.iter().map(|m| {
                 (running || players.is_some_and(|p| p.contains_key(&(m.id as i32))))
-                    .then(|| w.fluids(m.bounds(), m.eye_y()))
+                    .then(|| w.mob_fluids(m))
             }));
             rain.clear();
             rain.extend(self.mobs.iter().map(|m| {

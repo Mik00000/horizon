@@ -380,6 +380,21 @@ impl CurrentTarget for MotionWorld<'_, '_, '_> {
         Ok(())
     }
 }
+/// What `AbstractBoat.modifyPassengerFluidInteractionBox` does to a passenger's
+/// deflated fluid interaction box: keeps only the part above the boat's top
+/// unless the boat is underwater; returns `None` if the boat reaches the passenger's head.
+pub fn modify_passenger_fluid_box(passenger_box: Aabb, boat: RiddenBoat) -> Option<Aabb> {
+    if boat.under_water {
+        return Some(passenger_box);
+    }
+    let (lo, hi) = (passenger_box.min_position(), passenger_box.max_position());
+    // A boat that reaches the passenger's head shelters all of it; else
+    // only what lies above the boat's top counts.
+    if boat.max_y >= hi.y {
+        return None;
+    }
+    Some(Aabb::new(Vec3::new(lo.x, lo.y.max(boat.max_y), lo.z), hi))
+}
 impl FluidInteractionWorld for MotionWorld<'_, '_, '_> {
     type Error = Box<dyn std::error::Error>;
     type Chunk = ();
@@ -387,19 +402,10 @@ impl FluidInteractionWorld for MotionWorld<'_, '_, '_> {
         // Entity.getFluidInteractionBox: the box less 0.001, then the vehicle's
         // say (`AbstractBoat.modifyPassengerFluidInteractionBox`).
         let b = self.player.bounds().deflate(Vec3::new(0.001, 0.001, 0.001));
-        let Some(boat) = self.player.fluids.boat.filter(|boat| !boat.under_water) else {
+        let Some(boat) = self.player.fluids.boat else {
             return Ok(Some(b));
         };
-        let (lo, hi) = (b.min_position(), b.max_position());
-        // A boat that reaches the passenger's head shelters all of it; else
-        // only what lies above the boat's top counts.
-        if boat.max_y >= hi.y {
-            return Ok(None);
-        }
-        Ok(Some(Aabb::new(
-            Vec3::new(lo.x, lo.y.max(boat.max_y), lo.z),
-            hi,
-        )))
+        Ok(modify_passenger_fluid_box(b, boat))
     }
     fn loaded_chunk(&mut self, x: i32, z: i32) -> Result<Option<()>> {
         Ok(self.scene.chunks.contains_key(&(x, z)).then_some(()))

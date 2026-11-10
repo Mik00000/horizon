@@ -148,6 +148,11 @@ impl Game<'_> {
         self.seat_tnt_mobs(&riders);
         self.seat_cushion_mobs(&riders);
         self.seat_static_mobs(&riders);
+        self.leash_boats = self
+            .boats
+            .iter()
+            .map(super::boat_leads::boat_state)
+            .collect();
         let index: HashMap<u32, usize> = self
             .mobs
             .iter()

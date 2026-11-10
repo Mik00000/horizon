@@ -143,9 +143,30 @@ impl MobWorld<'_> {
         }
         (f.fluid, f64::from(f.fluid_level) / 9.0)
     }
+    /// The boat a rider sits in, if any, for `Entity.getFluidInteractionBox`.
+    pub fn ridden_boat(&self, vehicle: Option<u32>) -> Option<crate::motion::RiddenBoat> {
+        let id = vehicle?;
+        self.leash_boats
+            .iter()
+            .find(|(boat_id, _)| *boat_id == id)
+            .map(|(_, state)| state.ridden_boat())
+    }
+    /// Mob fluids evaluated over its `Entity.getFluidInteractionBox`.
+    pub fn mob_fluids(&self, m: &Mob) -> Fluids {
+        let boat = self.ridden_boat(m.extra.mount);
+        let interaction_box = m.fluid_interaction_box(boat);
+        self.fluids_in_box(interaction_box, m.eye_y())
+    }
     /// Entity.updateFluidHeightAndDoFluidPushing heights over the deflated box.
     pub fn fluids(&self, bounds: Aabb, eye_y: f64) -> Fluids {
         let b = bounds.deflate(Vec3::new(0.001, 0.001, 0.001));
+        self.fluids_in_box(Some(b), eye_y)
+    }
+    /// Entity.updateFluidHeightAndDoFluidPushing heights over the fluid interaction box.
+    pub fn fluids_in_box(&self, interaction_box: Option<Aabb>, eye_y: f64) -> Fluids {
+        let Some(b) = interaction_box else {
+            return Fluids::default();
+        };
         let (lo, hi) = (b.min_position(), b.max_position());
         let mut out = Fluids::default();
         // The eye column below, in the box but for a box thinner than the
@@ -286,13 +307,25 @@ impl MobWorld<'_> {
     /// box: the flow of every water and lava block it touches, summed (a thin
     /// fluid layer scales its flow down), as (water, lava); `modded` sums the
     /// flow of that mod fluid instead.
-    fn fluid_currents(
+    pub fn fluid_currents(
         &self,
         bounds: Aabb,
         modded: Option<FluidKind>,
     ) -> (CurrentAccumulator, CurrentAccumulator) {
-        let base_y = bounds.min_position().y;
         let b = bounds.deflate(Vec3::new(0.001, 0.001, 0.001));
+        self.fluid_currents_in_box(Some(b), bounds.min_position().y, modded)
+    }
+    /// Entity.updateFluidHeightAndDoFluidPushing's currents over the fluid interaction
+    /// box: the flow of every water and lava block it touches, summed.
+    pub fn fluid_currents_in_box(
+        &self,
+        interaction_box: Option<Aabb>,
+        base_y: f64,
+        modded: Option<FluidKind>,
+    ) -> (CurrentAccumulator, CurrentAccumulator) {
+        let Some(b) = interaction_box else {
+            return (CurrentAccumulator::default(), CurrentAccumulator::default());
+        };
         let (lo, hi) = (b.min_position(), b.max_position());
         let mut scene = FlowScene(self);
         let (mut water, mut lava) = (CurrentAccumulator::default(), CurrentAccumulator::default());
@@ -997,14 +1030,26 @@ impl Mob {
             speed: f64::from(0.15_f32),
         });
     }
+    /// `Entity.getFluidInteractionBox`: the deflated box, or the vehicle's say
+    /// (`AbstractBoat.modifyPassengerFluidInteractionBox`) when riding a boat.
+    pub fn fluid_interaction_box(&self, boat: Option<crate::motion::RiddenBoat>) -> Option<Aabb> {
+        let b = self.bounds().deflate(Vec3::new(0.001, 0.001, 0.001));
+        let Some(boat) = boat else {
+            return Some(b);
+        };
+        crate::motion::modify_passenger_fluid_box(b, boat)
+    }
     /// Entity.updateFluidInteraction: the fluid state, then touching water
     /// resets the fall and entering it (after the first tick) splashes.
     pub(super) fn update_fluids(&mut self, w: &MobWorld, events: &mut Vec<MobEvent>) {
         let was_touching_water = self.fluids.in_water;
-        self.fluids = w.fluids(self.bounds(), self.eye_y());
+        let boat = w.ridden_boat(self.extra.mount);
+        let interaction_box = self.fluid_interaction_box(boat);
+        self.fluids = w.fluids_in_box(interaction_box, self.eye_y());
         // EntityFluidInteraction.applyCurrentTo: the flow pushes the mob.
         if (self.fluids.in_water || self.fluids.in_lava) && self.pushed_by_fluid() {
-            let (water, lava) = w.fluid_currents(self.bounds(), None);
+            let (water, lava) =
+                w.fluid_currents_in_box(interaction_box, self.bounds().min_position().y, None);
             let lava_scale = if w.dimension_type.fast_lava {
                 0.007
             } else {
@@ -1023,7 +1068,11 @@ impl Mob {
         if let Some(m) = self.fluids.modded {
             let numbers = m.fluid.info().entity;
             if numbers.can_push && self.pushed_by_fluid() {
-                let (current, _) = w.fluid_currents(self.bounds(), Some(m.fluid));
+                let (current, _) = w.fluid_currents_in_box(
+                    interaction_box,
+                    self.bounds().min_position().y,
+                    Some(m.fluid),
+                );
                 let _ = current.apply_to(&mut Pushed(&mut self.velocity), numbers.motion_scale);
             }
             self.fall_distance *= f64::from(numbers.fall_distance_modifier);

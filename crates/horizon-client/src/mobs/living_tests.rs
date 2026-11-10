@@ -1175,3 +1175,105 @@ fn a_steered_mount_moves_through_the_air_at_a_tenth_of_its_speed() {
     m.extra.saddled = true;
     assert_eq!(m.flying_speed(), 0.3_f32 * 0.1);
 }
+
+/// Issue #14650: A mob sitting in a boat on water should not count as in water
+/// unless the boat is underwater or water reaches above the boat's top.
+#[test]
+fn mob_sitting_in_boat_on_water_excludes_submerged_boat_portion() {
+    let build = |world: &mut crate::world::World,
+                 registry: &horizon_world::registry::BlockRegistry| {
+        world.chunks.insert(
+            (0, 0),
+            std::sync::Arc::new(crate::chunk::Chunk::empty(0, 0)),
+        );
+        let water = registry.default_state("minecraft:water").unwrap();
+        // Water at y=0, air at y=1 and above.
+        for x in 0..=2 {
+            for z in 0..=2 {
+                world.set(x, 0, z, water).unwrap();
+            }
+        }
+    };
+    crate::mobs::world::with_built_test_world(&[], build, |base_w, types| {
+        let kind = std::sync::Arc::new(types.types["minecraft:zombie"].clone());
+        let boat_id = 42;
+        let boat_pos = Vec3::new(1.0, 0.9, 1.0);
+        let boat_height = 0.5625; // boat top is at 0.9 + 0.5625 = 1.4625
+        let boat_holder = crate::mobs::leash::HolderState {
+            position: boat_pos,
+            center: Vec3::new(boat_pos.x, boat_pos.y + 0.25, boat_pos.z),
+            width: 1.375,
+            height: boat_height,
+            yaw: 0.0,
+            velocity: Vec3::ZERO,
+            under_water: false,
+        };
+        let boats = [(boat_id, boat_holder)];
+        let w = MobWorld {
+            leash_boats: &boats,
+            ..base_w.clone()
+        };
+
+        // 1. Zombie riding boat floating on water: feet hang down into y=0 (water),
+        // but fluid interaction box excludes the submerged part below the boat's top.
+        let mut zombie = Mob::new(1, kind.clone(), Vec3::new(1.0, 0.5, 1.0), 0.0);
+        zombie.extra.mount = Some(boat_id);
+
+        let interaction_box = zombie.fluid_interaction_box(w.ridden_boat(zombie.extra.mount));
+        assert!(interaction_box.is_some());
+        let ib = interaction_box.unwrap();
+        let expected_min_y = boat_pos.y + boat_height;
+        assert!((ib.min_position().y - expected_min_y).abs() < 1.0e-5);
+
+        let mut events = Vec::new();
+        zombie.update_fluids(&w, &mut events);
+        assert!(
+            !zombie.fluids.in_water,
+            "mob in boat on water should not be in_water"
+        );
+        assert_eq!(zombie.fluids.water, 0.0);
+        assert!(!zombie.fluids.eye_in_water);
+        assert!(
+            events.is_empty(),
+            "entering boat on water should not splash"
+        );
+
+        // 2. Underwater boat: passenger interaction box is NOT cropped.
+        let underwater_holder = crate::mobs::leash::HolderState {
+            under_water: true,
+            ..boat_holder
+        };
+        let underwater_boats = [(boat_id, underwater_holder)];
+        let uw_world = MobWorld {
+            leash_boats: &underwater_boats,
+            ..base_w.clone()
+        };
+        let mut drowned_boat_mob = Mob::new(2, kind.clone(), Vec3::new(1.0, 0.5, 1.0), 0.0);
+        drowned_boat_mob.extra.mount = Some(boat_id);
+        drowned_boat_mob.update_fluids(&uw_world, &mut events);
+        assert!(
+            drowned_boat_mob.fluids.in_water,
+            "submerged boat passenger counts as in water"
+        );
+        assert!(drowned_boat_mob.fluids.water > 0.0);
+
+        // 3. Tall boat exceeding the passenger's top shelters passenger completely.
+        let tall_holder = crate::mobs::leash::HolderState {
+            height: 5.0,
+            ..boat_holder
+        };
+        let tall_boats = [(boat_id, tall_holder)];
+        let tall_world = MobWorld {
+            leash_boats: &tall_boats,
+            ..base_w.clone()
+        };
+        let mut sheltered_mob = Mob::new(3, kind, Vec3::new(1.0, 0.5, 1.0), 0.0);
+        sheltered_mob.extra.mount = Some(boat_id);
+        assert_eq!(
+            sheltered_mob.fluid_interaction_box(tall_world.ridden_boat(sheltered_mob.extra.mount)),
+            None
+        );
+        sheltered_mob.update_fluids(&tall_world, &mut events);
+        assert!(!sheltered_mob.fluids.in_water);
+    });
+}

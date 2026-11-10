@@ -50,12 +50,12 @@ pub fn native_living_jump(entity: u32, kind: &str) {
 }
 
 pub(crate) mod environment;
-mod fluids;
+pub(crate) mod fluids;
 pub use fluids::{
     BubbleColumn, FluidResources, FluidTags, LAVA, PlayerFluids, RiddenBoat, WATER,
     bubble_column_at, bubble_column_push, bubble_column_push_over, bubble_column_surfaces,
+    modify_passenger_fluid_box,
 };
-
 pub struct MotionResources {
     pub attributes: Arc<Catalog>,
     pub blocks: BoundMovementProperties,
