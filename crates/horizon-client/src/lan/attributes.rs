@@ -98,6 +98,7 @@ pub fn apply<G: FnMut() -> i32>(map: &mut LiveAttributes<G>, values: &[Attribute
             for m in modifiers {
                 instance.add_transient(m, observer)?;
             }
+            let _ = instance.value();
             Ok(())
         });
     }

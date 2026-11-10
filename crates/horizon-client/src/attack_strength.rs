@@ -67,10 +67,16 @@ impl AttackStrength {
     }
     /// `getAttackStrengthScale(a)` with the ATTACK_SPEED attribute value.
     pub fn scale(&self, a: f32, attack_speed: f64) -> f32 {
+        if attack_speed >= 16.0 {
+            return 1.0;
+        }
         ((self.ticker as f32 + a) / delay(attack_speed)).clamp(0.0, 1.0)
     }
     /// `getItemSwapScale(a)`.
     pub fn swap_scale(&self, a: f32, attack_speed: f64) -> f32 {
+        if attack_speed >= 16.0 {
+            return 1.0;
+        }
         ((self.swap_ticker as f32 + a) / delay(attack_speed)).clamp(0.0, 1.0)
     }
 }
@@ -193,15 +199,35 @@ mod tests {
     }
     #[test]
     fn a_server_attack_speed_charges_at_once() {
-        // 1.8-style servers raise ATTACK_SPEED: with 1024 the delay is under
-        // a tick, so getAttackStrengthScale(0.5) is full right after a hit.
+        // 1.8-style servers raise ATTACK_SPEED (e.g. 16.0, 20.0 or 1024.0):
+        // with high attack speed full charge takes <= 1 tick and delivers full
+        // attack strength without delay or indicator.
         let mut s = AttackStrength::default();
         s.reset_attack();
         assert_eq!(s.scale(0.5, 1024.0), 1.0);
+        assert_eq!(s.scale(0.0, 1024.0), 1.0);
+        assert_eq!(s.scale(0.5, 20.0), 1.0);
+        assert_eq!(s.scale(0.0, 20.0), 1.0);
+        assert_eq!(s.scale(0.5, 16.0), 1.0);
+        assert_eq!(s.scale(0.0, 16.0), 1.0);
+        assert_eq!(s.swap_scale(0.0, 16.0), 1.0);
+        assert_eq!(s.swap_scale(0.0, 20.0), 1.0);
         assert!(attacker_slows_after_hit(
             CLIENT_DAMAGE,
             0.0,
             s.scale(0.5, 1024.0),
+            true
+        ));
+        assert!(attacker_slows_after_hit(
+            CLIENT_DAMAGE,
+            0.0,
+            s.scale(0.5, 20.0),
+            true
+        ));
+        assert!(attacker_slows_after_hit(
+            CLIENT_DAMAGE,
+            0.0,
+            s.scale(0.5, 16.0),
             true
         ));
         // A sword's own 1.6 leaves it uncharged.

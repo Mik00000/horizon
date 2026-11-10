@@ -9,7 +9,11 @@ impl Game<'_> {
         if self.legacy_rules() {
             return 1.0;
         }
-        let delay = horizon_client::attack_strength::delay(self.main_hand_attack_speed());
+        let speed = self.main_hand_attack_speed();
+        if speed >= 16.0 {
+            return 1.0;
+        }
+        let delay = horizon_client::attack_strength::delay(speed);
         ((self.attack_ticks as f32 + 0.5) / delay).clamp(0.0, 1.0)
     }
     /// `Player.isSweepAttack`: a charged, grounded sword hit below the movement limit.

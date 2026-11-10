@@ -351,8 +351,12 @@ impl Game<'_> {
     /// `minimum_attack_charge` of 1, counting `tolerance` ticks more than the
     /// `ticker` ticks charged.
     pub(super) fn cannot_attack_with_item(&self, ticker: i32, tolerance: i32) -> bool {
+        let speed = self.main_hand_attack_speed();
+        if speed >= 16.0 {
+            return false;
+        }
         self.held().is_some_and(|s| Kinetic::of(&s.item).is_some())
-            && (ticker + tolerance) as f32 / delay(self.main_hand_attack_speed()) < 1.0
+            && (ticker + tolerance) as f32 / delay(speed) < 1.0
     }
 
     /// `PiercingWeapon.attack` of the spear in the main hand, for a left

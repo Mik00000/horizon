@@ -740,12 +740,27 @@ impl Game<'_> {
     /// Haste and Mining Fatigue modifiers (`ADD_MULTIPLIED_TOTAL`), clamped to
     /// the attribute's range.
     pub(super) fn main_hand_attack_speed(&self) -> f64 {
+        if self.remote.is_some()
+            && let Some(speed) = self.player.as_ref().and_then(|player| {
+                let key = player
+                    .attributes
+                    .key("minecraft:attack_speed")
+                    .or_else(|| player.attributes.key("minecraft:generic.attack_speed"))?;
+                player.attributes.lookup(Some(&key))?;
+                player.attributes.cached_value(Some(&key)).ok()
+            })
+        {
+            return speed.clamp(0.0, 1024.0);
+        }
         // The base comes from the player's attribute map so `/attribute ... base set` applies.
         let base = self
             .player
             .as_ref()
             .and_then(|player| {
-                let key = player.attributes.key("minecraft:attack_speed")?;
+                let key = player
+                    .attributes
+                    .key("minecraft:attack_speed")
+                    .or_else(|| player.attributes.key("minecraft:generic.attack_speed"))?;
                 let handle = player.attributes.lookup(Some(&key))?;
                 player
                     .attributes
