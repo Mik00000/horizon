@@ -476,3 +476,124 @@ fn cancel_stops_every_worker_within_a_chunk() {
         }
     }
 }
+
+#[test]
+fn parallel_all_chunk_positions_deterministic() {
+    let world = TempWorld::new("all-chunks");
+    let folder = world.folder(OVERWORLD, "region");
+    let coords = [(-2, -1), (0, 0), (1, 0), (2, 2)];
+    for &(rx, rz) in &coords {
+        let file = folder.join(format!("r.{rx}.{rz}.mca"));
+        let chunks: Vec<_> = (0..5)
+            .map(|i| {
+                let x = rx * 32 + i;
+                let z = rz * 32 + i;
+                let tag = Tag::compound([
+                    ("DataVersion", Tag::Int(4000)),
+                    ("xPos", Tag::Int(x)),
+                    ("zPos", Tag::Int(z)),
+                ]);
+                (ChunkPos::new(x, z), tag)
+            })
+            .collect();
+        write_chunks(&file, &chunks);
+    }
+    let files = all_chunk_positions(&folder);
+    assert_eq!(files.len(), coords.len());
+    // Rayon parallel collection must preserve sorted path order.
+    for i in 1..files.len() {
+        assert!(
+            files[i - 1].path < files[i].path,
+            "region files must be sorted deterministically"
+        );
+    }
+    for file in &files {
+        assert_eq!(file.chunks.len(), 5);
+        for i in 1..file.chunks.len() {
+            assert!(file.chunks[i - 1].x < file.chunks[i].x);
+        }
+    }
+}
+
+#[test]
+fn parallel_region_conversion_thread_safety_and_progress() {
+    let world = TempWorld::new("par-progress");
+    let folder = world.folder(OVERWORLD, "entities");
+    for rx in 0..6 {
+        for rz in 0..2 {
+            let file = folder.join(format!("r.{rx}.{rz}.mca"));
+            let chunks: Vec<_> = (0..4)
+                .map(|i| {
+                    let pos = ChunkPos::new(rx * 32 + i, rz * 32 + i);
+                    (pos, entity_chunk(4000, pos.x, pos.z))
+                })
+                .collect();
+            write_chunks(&file, &chunks);
+        }
+    }
+    let progress = Arc::new(UpgradeProgress::new());
+    let mut builder = Builder::new(UpgradeDataFixType::EntityChunk, "entities", false);
+    builder.threads = 4;
+    let mut upgrader =
+        RegionStorageUpgrader::init(builder, progress.clone(), 0, OVERWORLD, &world.0);
+    assert_eq!(upgrader.file_amount(), 12);
+    assert_eq!(progress.total_chunks(), 48);
+    upgrader.upgrade();
+    assert_eq!(progress.status(), UpgradeStatus::Finished);
+    assert_eq!(progress.converted(), 48);
+    assert_eq!(progress.skipped(), 0);
+    assert_eq!(progress.total_progress(), 1.0);
+    assert_eq!(progress.dimension_progress(OVERWORLD), 1.0);
+}
+
+#[test]
+fn parallel_region_conversion_perf() {
+    let source = multi_region_world("par-perf-src");
+    let t1_world = TempWorld::new("par-perf-t1");
+    copy_tree(&source.0, &t1_world.0);
+    let t1_progress = Arc::new(UpgradeProgress::new());
+    let t1_start = std::time::Instant::now();
+    work_with_threads(
+        &t1_world.0,
+        &level(&t1_world),
+        &t1_progress,
+        false,
+        false,
+        1,
+    );
+    let t1_dur = t1_start.elapsed();
+
+    let t4_world = TempWorld::new("par-perf-t4");
+    copy_tree(&source.0, &t4_world.0);
+    let t4_progress = Arc::new(UpgradeProgress::new());
+    let t4_start = std::time::Instant::now();
+    work_with_threads(
+        &t4_world.0,
+        &level(&t4_world),
+        &t4_progress,
+        false,
+        false,
+        4,
+    );
+    let t4_dur = t4_start.elapsed();
+
+    assert!(t1_progress.is_finished());
+    assert!(t4_progress.is_finished());
+    assert_eq!(t1_progress.converted(), t4_progress.converted());
+    assert_eq!(t1_progress.skipped(), t4_progress.skipped());
+
+    let mut t1_files = BTreeMap::new();
+    snapshot(&t1_world.0, Path::new(""), &mut t1_files);
+    let mut t4_files = BTreeMap::new();
+    snapshot(&t4_world.0, Path::new(""), &mut t4_files);
+    assert_eq!(
+        t1_files, t4_files,
+        "parallel and 1-thread outputs must be byte-identical"
+    );
+
+    // Output performance timing for visibility.
+    eprintln!(
+        "WorldUpgrader parallel conversion: 1-thread={:?}, 4-threads={:?}",
+        t1_dur, t4_dur
+    );
+}

@@ -14,12 +14,13 @@ use crate::compression::Compression;
 use crate::nbt::{Limits, Tag};
 use crate::region::{ChunkRecord, RegionFile};
 use horizon_core::position::ChunkPos;
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 const NEW_DIRECTORY_PREFIX: &str = "new_";
@@ -222,40 +223,34 @@ impl RegionStorageUpgrader {
         let total_size = self.progress.total_file_fix_stats().total_operations() as f32;
         self.progress.set_status(UpgradeStatus::Upgrading);
         let files = std::mem::take(&mut self.files);
-        let next = AtomicUsize::new(0);
-        // Guards the finished-file count together with the progress it sets,
-        // so the shown progress never goes back.
-        let finished = Mutex::new(0usize);
+        // Tracks the finished-file count atomically so the shown progress never goes back.
+        let finished = AtomicUsize::new(0);
         let workers = self.builder.threads.clamp(1, files.len());
         let this = &*self;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .thread_name(|i| format!("World Upgrader #{i}"))
+            .build();
         let work = || {
-            // The cancel flag is looked at before every file, as the vanilla
-            // loop does, and before every chunk (`upgrade_file`).
-            while !this.progress.is_canceled() {
-                let index = next.fetch_add(1, Ordering::Relaxed);
-                let Some(file) = files.get(index) else {
-                    break;
-                };
+            files.par_iter().for_each(|file| {
+                // The cancel flag is looked at before every file, as the vanilla
+                // loop does, and before every chunk (`upgrade_file`).
+                if this.progress.is_canceled() {
+                    return;
+                }
                 this.upgrade_file(file);
-                let mut done = finished.lock().unwrap_or_else(|e| e.into_inner());
-                *done += 1;
-                let dimension_progress = *done as f32 / total_size;
-                let total_progress = (this.start_index as usize + *done) as f32 / total_size;
+                let done = finished.fetch_add(1, Ordering::SeqCst) + 1;
+                let dimension_progress = done as f32 / total_size;
+                let total_progress = (this.start_index as usize + done) as f32 / total_size;
                 this.progress
                     .set_dimension_progress(&this.dimension, dimension_progress);
                 this.progress.set_total_progress(total_progress);
-            }
+            });
         };
-        std::thread::scope(|scope| {
-            // This thread is worker 0; a helper that fails to start leaves
-            // its share to the others.
-            for i in 1..workers {
-                let _ = std::thread::Builder::new()
-                    .name(format!("World Upgrader #{i}"))
-                    .spawn_scoped(scope, work);
-            }
-            work();
-        });
+        match pool {
+            Ok(pool) => pool.install(work),
+            Err(_) => work(),
+        }
         self.progress.set_status(UpgradeStatus::Finished);
         self.close();
     }
@@ -436,40 +431,44 @@ fn all_chunk_positions(folder: &Path) -> Vec<FileToUpgrade> {
     };
     let mut paths: Vec<PathBuf> = read.filter_map(Result::ok).map(|e| e.path()).collect();
     paths.sort();
-    let mut out = Vec::new();
-    for path in paths {
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        let Some((rx, rz)) = region_coordinates(&name) else {
-            continue;
-        };
-        let (x_offset, z_offset) = (rx.wrapping_shl(5), rz.wrapping_shl(5));
-        match RegionFile::open(&path) {
-            Ok(region) => {
-                let present: HashSet<ChunkPos> = region.chunks().map(|(p, _)| p).collect();
-                let mut chunks = Vec::new();
-                for x in 0..32 {
-                    for z in 0..32 {
-                        let pos = ChunkPos::new(x + x_offset, z + z_offset);
-                        if present.contains(&pos) {
-                            chunks.push(pos);
+    paths
+        .into_par_iter()
+        .filter_map(|path| {
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let (rx, rz) = region_coordinates(&name)?;
+            let (x_offset, z_offset) = (rx.wrapping_shl(5), rz.wrapping_shl(5));
+            match RegionFile::open(&path) {
+                Ok(region) => {
+                    let present: HashSet<ChunkPos> = region.chunks().map(|(p, _)| p).collect();
+                    let mut chunks = Vec::new();
+                    for x in 0..32 {
+                        for z in 0..32 {
+                            let pos = ChunkPos::new(x + x_offset, z + z_offset);
+                            if present.contains(&pos) {
+                                chunks.push(pos);
+                            }
                         }
                     }
+                    if chunks.is_empty() {
+                        None
+                    } else {
+                        Some(FileToUpgrade { path, chunks })
+                    }
                 }
-                if !chunks.is_empty() {
-                    out.push(FileToUpgrade { path, chunks });
+                Err(e) => {
+                    eprintln!(
+                        "Failed to read chunks from region file {}: {e}",
+                        path.display()
+                    );
+                    None
                 }
             }
-            Err(e) => eprintln!(
-                "Failed to read chunks from region file {}: {e}",
-                path.display()
-            ),
-        }
-    }
-    out
+        })
+        .collect()
 }
 
 /// `WorldUpgrader`: runs on its own thread from [`WorldUpgrader::new`] on.

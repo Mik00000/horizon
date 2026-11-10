@@ -12,11 +12,12 @@ use super::{CURRENT, update};
 use crate::compression::Compression;
 use crate::nbt::{self, Compound, JavaString, Limits, NamedTag, Tag};
 use crate::region::{ChunkRecord, RegionFile, RegionWriter};
+use rayon::prelude::*;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The name `SharedConstants.getCurrentVersion().name()` writes in level.dat.
 pub const VERSION_NAME: &str = horizon_core::version::VANILLA_VERSION;
@@ -759,15 +760,18 @@ fn upgrade_regions_with_threads(
     }
     let staging = folder.join(".datafix");
     fs::create_dir_all(&staging)?;
-    let next = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
     let failed: Mutex<Option<(usize, io::Error)>> = Mutex::new(None);
+    let workers = threads.clamp(1, files.len());
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .thread_name(|i| format!("World Upgrader #{i}"))
+        .build();
     let work = || {
-        while !stop.load(Ordering::Relaxed) {
-            let index = next.fetch_add(1, Ordering::Relaxed);
-            let Some(path) = files.get(index) else {
-                break;
-            };
+        files.par_iter().enumerate().for_each(|(index, path)| {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
             match progress
                 .check()
                 .and_then(|()| upgrade_region_file(path, &staging, &fix))
@@ -781,18 +785,12 @@ fn upgrade_regions_with_threads(
                     }
                 }
             }
-        }
+        });
     };
-    std::thread::scope(|scope| {
-        // This thread is worker 0; a helper that fails to start leaves its
-        // share to the others.
-        for i in 1..threads.clamp(1, files.len()) {
-            let _ = std::thread::Builder::new()
-                .name(format!("World Upgrader #{i}"))
-                .spawn_scoped(scope, work);
-        }
-        work();
-    });
+    match pool {
+        Ok(pool) => pool.install(work),
+        Err(_) => work(),
+    }
     if let Some((_, e)) = failed.into_inner().unwrap_or_else(|e| e.into_inner()) {
         let _ = fs::remove_dir(&staging);
         return Err(e);
