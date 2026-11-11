@@ -14,6 +14,7 @@ pub mod level_key;
 pub mod no_ai;
 pub mod noise;
 pub mod paletted;
+pub mod parallel;
 pub mod position;
 pub mod prepared_files;
 pub mod random;

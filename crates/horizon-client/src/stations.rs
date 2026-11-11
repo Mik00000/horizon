@@ -970,10 +970,11 @@ impl StationRecipes {
         }
         let mut sources: Vec<(String, Value)> = files
             .iter()
-            .flat_map(|(namespace, folder)| folder.files.iter().map(move |f| (namespace, f)))
-            .filter_map(|(namespace, file)| {
-                let v = serde_json::from_slice::<Value>(file.bytes().ok()?).ok()?;
-                Some((format!("{namespace}:{}", file.name), v))
+            .flat_map(|(namespace, folder)| {
+                horizon_core::parallel::parallel_filter_map_slice(&folder.files, |file| {
+                    let v = serde_json::from_slice::<Value>(file.bytes().ok()?).ok()?;
+                    Some((format!("{namespace}:{}", file.name), v))
+                })
             })
             .collect();
         // The world's packs' recipes over the game's own: the top pack's

@@ -180,6 +180,11 @@ impl Zip {
     pub fn read(&self, name: &str) -> io::Result<Vec<u8>> {
         self.read_within(name, &self.budget)
     }
+    #[cfg(test)]
+    pub(crate) fn with_read_budget(self, bytes: u64) -> Self {
+        self.budget.store(bytes, Ordering::Relaxed);
+        self
+    }
     /// `read`, drawing `budget` down as entries are returned: a per-entry cap
     /// is not a total one, and a bomb spends its budget one 1 GiB entry at a
     /// time otherwise.

@@ -600,12 +600,15 @@ fn int_value(v: &Value) -> Option<i64> {
 /// pack's file for each id replaces the rest (`SimpleJsonResourceReloadListener`
 /// sees one resource per id).
 fn overlay_map(overlay: &PackOverlay, kind: &str, out: &mut HashMap<String, Value>) {
-    for (id, files) in overlay.kind(kind) {
-        let Ok(v) = serde_json::from_slice::<Value>(PackOverlay::top(files)) else {
-            continue;
-        };
-        out.insert(id.to_owned(), v);
-    }
+    let entries: Vec<_> = overlay.kind(kind).collect();
+    out.extend(horizon_core::parallel::parallel_filter_map_slice(
+        &entries,
+        |(id, f)| {
+            serde_json::from_slice::<Value>(PackOverlay::top(f))
+                .ok()
+                .map(|v| ((*id).to_owned(), v))
+        },
+    ));
 }
 
 mod odds;
@@ -776,16 +779,19 @@ fn load_dir(
     prefix: &str,
     out: &mut HashMap<String, Value>,
 ) -> io::Result<()> {
-    // Through `json_folder`: a load holding the folder (the recipes, read by
-    // the item tables, the recipe book and the server's sync too) shares one
-    // read of it.
+    // Through `json_folder`: a load holding the folder shares one read of it.
     let Ok(folder) = crate::json_folder::read(dir) else {
         return Ok(());
     };
-    for file in &folder.files {
-        let value = serde_json::from_slice(file.bytes()?)?;
-        out.insert(format!("{namespace}:{prefix}{}", file.name), value);
-    }
+    let parsed: io::Result<Vec<_>> =
+        horizon_core::parallel::parallel_map_slice(&folder.files, |file| {
+            let val = serde_json::from_slice(file.bytes()?)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            Ok((format!("{namespace}:{prefix}{}", file.name), val))
+        })
+        .into_iter()
+        .collect();
+    out.extend(parsed?);
     Ok(())
 }
 fn cost(v: &Value) -> (i32, i32) {

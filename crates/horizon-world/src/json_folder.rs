@@ -64,15 +64,12 @@ pub fn held(dir: &Path) -> Option<Arc<Folder>> {
 fn read_uncached(dir: &Path) -> io::Result<Arc<Folder>> {
     let files = match prepared(dir) {
         Some(files) => files,
-        None => list(dir)?
-            .into_iter()
-            .map(|(name, path)| {
-                let bytes = fs::read(&path)
-                    .map(Vec::into_boxed_slice)
-                    .map_err(|e| (e.kind(), e.to_string()));
-                File { name, path, bytes }
-            })
-            .collect(),
+        None => horizon_core::parallel::parallel_map(list(dir)?, |(name, path)| {
+            let bytes = fs::read(&path)
+                .map(Vec::into_boxed_slice)
+                .map_err(|e| (e.kind(), e.to_string()));
+            File { name, path, bytes }
+        }),
     };
     let folder = Arc::new(Folder { files });
     let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());

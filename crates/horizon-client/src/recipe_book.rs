@@ -1124,10 +1124,11 @@ impl RecipeIndex {
         let folder = crate::json_folder::read(&dir).ok();
         let mut sources: Vec<(String, serde_json::Value)> = folder
             .iter()
-            .flat_map(|folder| &folder.files)
-            .filter_map(|file| {
-                let v = serde_json::from_slice::<serde_json::Value>(file.bytes().ok()?).ok()?;
-                Some((format!("minecraft:{}", file.name), v))
+            .flat_map(|folder| {
+                horizon_core::parallel::parallel_filter_map_slice(&folder.files, |file| {
+                    let v = serde_json::from_slice::<serde_json::Value>(file.bytes().ok()?).ok()?;
+                    Some((format!("minecraft:{}", file.name), v))
+                })
             })
             .collect();
         for namespace in crate::mod_content::namespaces(root) {
@@ -1137,10 +1138,14 @@ impl RecipeIndex {
             if let Ok(folder) =
                 crate::json_folder::read(&root.join(format!("data/{namespace}/recipe")))
             {
-                sources.extend(folder.files.iter().filter_map(|file| {
-                    let v = serde_json::from_slice::<serde_json::Value>(file.bytes().ok()?).ok()?;
-                    Some((format!("{namespace}:{}", file.name), v))
-                }));
+                sources.extend(horizon_core::parallel::parallel_filter_map_slice(
+                    &folder.files,
+                    |file| {
+                        let v =
+                            serde_json::from_slice::<serde_json::Value>(file.bytes().ok()?).ok()?;
+                        Some((format!("{namespace}:{}", file.name), v))
+                    },
+                ));
             }
         }
         for (id, files) in overlay.kind("recipe") {

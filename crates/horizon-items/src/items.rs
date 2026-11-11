@@ -544,16 +544,22 @@ pub(crate) fn load_tag_lists(
     /// Through `json_folder`: from the prepared data file, and read once for
     /// the tables a load builds from the same tags.
     fn walk(dir: &Path, namespace: &str, raw: &mut HashMap<String, Vec<String>>) -> Result<()> {
-        for file in &horizon_world::json_folder::read(dir)?.files {
-            let v: Value = serde_json::from_slice(file.bytes()?)?;
-            let values = v["values"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|e| e.as_str().or_else(|| e["id"].as_str()).map(str::to_owned))
-                .collect();
-            raw.insert(format!("{namespace}:{}", file.name), values);
-        }
+        let folder = horizon_world::json_folder::read(dir)?;
+        let parsed: std::result::Result<Vec<_>, String> =
+            horizon_core::parallel::parallel_map_slice(&folder.files, |file| {
+                let bytes = file.bytes().map_err(|e| e.to_string())?;
+                let v: Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+                let values = v["values"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.as_str().or_else(|| e["id"].as_str()).map(str::to_owned))
+                    .collect();
+                Ok((format!("{namespace}:{}", file.name), values))
+            })
+            .into_iter()
+            .collect();
+        raw.extend(parsed?);
         Ok(())
     }
     // Vanilla's tags; with content mods also the convention (`c`) tags and the mods' own.
@@ -563,17 +569,14 @@ pub(crate) fn load_tag_lists(
             walk(&dir, &namespace, &mut raw)?;
         }
     }
-    // The packs' entries join the game's own, in pack order; a `replace`
-    // file drops what the lower sources put in (`TagLoader.load` walks the
-    // resource stack the same way). `tag_kind` reads the packs' keys
-    // (`tags/<ns>:<registry>/<path>`) and yields the `ns:path` ids the raw
-    // map is keyed by.
+    // `tag_kind` gives sources in pack order: apply `replace` and append
+    // serially after decoding so higher packs retain their precedence.
     for (id, files) in overlay.tag_kind(kind) {
         let slot = raw.entry(id.to_owned()).or_default();
-        for bytes in files {
-            let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
-                continue;
-            };
+        let parsed = horizon_core::parallel::parallel_filter_map_slice(files, |b| {
+            serde_json::from_slice::<Value>(b).ok()
+        });
+        for v in parsed {
             if v["replace"].as_bool() == Some(true) {
                 slot.clear();
             }
@@ -598,14 +601,13 @@ pub(crate) fn load_tag_lists(
             }
         }
     }
-    Ok(raw
-        .keys()
-        .map(|k| {
-            let mut list = Vec::new();
-            resolve(k, &raw, &mut list, 0);
-            (k.clone(), list)
-        })
-        .collect())
+    let keys: Vec<_> = raw.keys().cloned().collect();
+    let resolved = horizon_core::parallel::parallel_map_slice(&keys, |k| {
+        let mut list = Vec::new();
+        resolve(k, &raw, &mut list, 0);
+        (k.clone(), list)
+    });
+    Ok(resolved.into_iter().collect())
 }
 /// An entity type id or `#tag` as the set of entity type ids it names.
 fn entity_spec(tags: &HashMap<String, HashSet<String>>, spec: &str) -> HashSet<String> {

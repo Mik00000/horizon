@@ -705,6 +705,17 @@ fn resource_id(file: &str, kind: &str, ext: &str) -> Option<String> {
         .strip_suffix(ext)?;
     Some(format!("{ns}:{path}"))
 }
+enum DecodedDataPackItem {
+    Function(String, Function),
+    FunctionError(String, String),
+    FunctionTag(String, bool, Vec<(String, bool)>),
+    Predicate(String, serde_json::Value),
+    ItemModifier(String, serde_json::Value),
+    SlotSourceTag(String, bool, Vec<(String, bool)>),
+    SlotSource(String, serde_json::Value),
+    File(String, Vec<u8>),
+}
+
 impl DataStore {
     pub fn load(packs: &[&DataPack]) -> Self {
         let mut s = Self::default();
@@ -713,78 +724,116 @@ impl DataStore {
             // listed by both kinds: handle every file once.
             let mut seen = std::collections::BTreeSet::new();
             let builtin = pack.id == "vanilla";
-            for f in pack.list_kinds(&[
-                "advancement",
-                "damage_type",
-                "data_maps",
-                "dialog",
-                "enchantment",
-                "function",
-                "item_modifier",
-                "loot_table",
-                "predicate",
-                "recipe",
-                "recipe_filter",
-                "slot_source",
-                "tags",
-                "trade_set",
-                "villager_trade",
-            ]) {
-                if !seen.insert(f.clone()) {
-                    continue;
-                }
-                if let Some(id) = resource_id(&f, "function", ".mcfunction")
-                    && let Some(bytes) = pack.read(&f)
+            let files: Vec<String> = pack
+                .list_kinds(&[
+                    "advancement",
+                    "damage_type",
+                    "data_maps",
+                    "dialog",
+                    "enchantment",
+                    "function",
+                    "item_modifier",
+                    "loot_table",
+                    "predicate",
+                    "recipe",
+                    "recipe_filter",
+                    "slot_source",
+                    "tags",
+                    "trade_set",
+                    "villager_trade",
+                ])
+                .into_iter()
+                .filter(|f| seen.insert(f.clone()))
+                .collect();
+            let decode = |f: &String| {
+                if let Some(id) = resource_id(f, "function", ".mcfunction")
+                    && let Some(bytes) = pack.read(f)
                 {
                     match parse_function(&id, &String::from_utf8_lossy(&bytes)) {
-                        Ok(func) => {
-                            s.functions.insert(id, func);
-                        }
-                        Err(e) => s.errors.push((id, e)),
+                        Ok(func) => Some(DecodedDataPackItem::Function(id, func)),
+                        Err(e) => Some(DecodedDataPackItem::FunctionError(id, e)),
                     }
-                } else if let Some(id) = resource_id(&f, "tags/function", ".json")
-                    && let Some(bytes) = pack.read(&f)
+                } else if let Some(id) = resource_id(f, "tags/function", ".json")
+                    && let Some(bytes) = pack.read(f)
                     && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
                 {
+                    let replace = v["replace"].as_bool() == Some(true);
                     let entries = tag_entries(&v);
-                    let slot = s.function_tags.entry(id).or_default();
-                    if v["replace"].as_bool() == Some(true) {
-                        slot.clear();
-                    }
-                    slot.extend(entries);
-                } else if let Some(id) = resource_id(&f, "predicate", ".json")
-                    && let Some(bytes) = pack.read(&f)
+                    Some(DecodedDataPackItem::FunctionTag(id, replace, entries))
+                } else if let Some(id) = resource_id(f, "predicate", ".json")
+                    && let Some(bytes) = pack.read(f)
                     && let Ok(v) = serde_json::from_slice(&bytes)
                 {
-                    s.predicates.insert(id, v);
-                } else if let Some(id) = resource_id(&f, "item_modifier", ".json")
-                    && let Some(bytes) = pack.read(&f)
+                    Some(DecodedDataPackItem::Predicate(id, v))
+                } else if let Some(id) = resource_id(f, "item_modifier", ".json")
+                    && let Some(bytes) = pack.read(f)
                     && let Ok(v) = serde_json::from_slice(&bytes)
                 {
-                    s.item_modifiers.insert(id, v);
-                } else if let Some(id) = resource_id(&f, "tags/slot_source", ".json")
-                    && let Some(bytes) = pack.read(&f)
+                    Some(DecodedDataPackItem::ItemModifier(id, v))
+                } else if let Some(id) = resource_id(f, "tags/slot_source", ".json")
+                    && let Some(bytes) = pack.read(f)
                     && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
                 {
+                    let replace = v["replace"].as_bool() == Some(true);
                     let entries = tag_entries(&v);
-                    let slot = s.slot_source_tags.entry(id).or_default();
-                    if v["replace"].as_bool() == Some(true) {
-                        slot.clear();
-                    }
-                    slot.extend(entries);
-                } else if let Some(id) = resource_id(&f, "slot_source", ".json")
-                    && let Some(bytes) = pack.read(&f)
+                    Some(DecodedDataPackItem::SlotSourceTag(id, replace, entries))
+                } else if let Some(id) = resource_id(f, "slot_source", ".json")
+                    && let Some(bytes) = pack.read(f)
                     && let Ok(v) = serde_json::from_slice(&bytes)
                 {
-                    s.slot_sources.insert(id, v);
+                    Some(DecodedDataPackItem::SlotSource(id, v))
                 } else if !builtin
-                    && let Some(id) = content_id(&f)
-                    && let Some(bytes) = pack.read(&f)
+                    && let Some(id) = content_id(f)
+                    && let Some(bytes) = pack.read(f)
                 {
                     // The built-in pack's content files are the resource
                     // root's own, which the tables read from disk; only the
                     // world's packs come through here.
-                    s.files.entry(id).or_default().push(bytes);
+                    Some(DecodedDataPackItem::File(id, bytes))
+                } else {
+                    None
+                }
+            };
+            // ZIP reads consume a shared inflated-byte budget. Keep their
+            // order so scheduling cannot change which resources are admitted.
+            let decoded = match &pack.source {
+                Source::Zip(_) => files.iter().filter_map(decode).collect(),
+                Source::Dir(_) => horizon_core::parallel::parallel_filter_map_slice(&files, decode),
+            };
+            for item in decoded {
+                match item {
+                    DecodedDataPackItem::Function(id, func) => {
+                        s.functions.insert(id, func);
+                    }
+                    DecodedDataPackItem::FunctionError(id, err) => {
+                        s.errors.push((id, err));
+                    }
+                    DecodedDataPackItem::FunctionTag(id, replace, entries) => {
+                        let slot = s.function_tags.entry(id).or_default();
+                        if replace {
+                            slot.clear();
+                        }
+                        slot.extend(entries);
+                    }
+                    DecodedDataPackItem::Predicate(id, v) => {
+                        s.predicates.insert(id, v);
+                    }
+                    DecodedDataPackItem::ItemModifier(id, v) => {
+                        s.item_modifiers.insert(id, v);
+                    }
+                    DecodedDataPackItem::SlotSourceTag(id, replace, entries) => {
+                        let slot = s.slot_source_tags.entry(id).or_default();
+                        if replace {
+                            slot.clear();
+                        }
+                        slot.extend(entries);
+                    }
+                    DecodedDataPackItem::SlotSource(id, v) => {
+                        s.slot_sources.insert(id, v);
+                    }
+                    DecodedDataPackItem::File(id, bytes) => {
+                        s.files.entry(id).or_default().push(bytes);
+                    }
                 }
             }
         }
@@ -1036,6 +1085,9 @@ pub fn worldgen_overrides(
     }
     (out, warnings)
 }
+
+#[cfg(test)]
+mod parallel_tests;
 
 #[cfg(test)]
 mod tests {

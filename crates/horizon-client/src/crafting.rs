@@ -1510,15 +1510,14 @@ impl Recipes {
             }
         }
         let filters = horizon_items::recipe_filters::RecipeFilters::load(root, overlay);
-        let mut parsed = Vec::with_capacity(sources.len());
-        for (name, bytes) in sources {
+        let parsed = horizon_core::parallel::parallel_filter_map(sources, |(name, bytes)| {
             // Vanilla's RecipeManager logs a file that does not parse and
             // goes on ("Couldn't parse data file").
             let mut v: Value = match serde_json::from_slice(&bytes) {
                 Ok(v) => v,
                 Err(e) => {
                     log::warn!("Horizon: recipe {name} not loaded: {e}");
-                    continue;
+                    return None;
                 }
             };
             // A file whose load conditions don't hold is silently absent,
@@ -1526,14 +1525,14 @@ impl Recipes {
             if !horizon_world::conditions::conditions_hold(&v, &|id: &str| {
                 mods.iter().any(|m| m == id)
             }) {
-                continue;
+                return None;
             }
             // The data's recipe filters, over the final set.
             if !filters.apply(&recipe_id(&name), &mut v) {
-                continue;
+                return None;
             }
-            parsed.push((name, v));
-        }
+            Some((name, v))
+        });
         Ok(parsed)
     }
     /// The tables from `sources` (`Recipes::sources`' shape); `root` and
@@ -1547,11 +1546,27 @@ impl Recipes {
         // Every table in registration order, whatever order the sources come
         // in (the world's packs' files after the game's own).
         sources.sort_by_cached_key(|(name, _)| registration_key(name));
-        let mut crafting = Vec::new();
-        let mut cooking = Vec::new();
-        let mut custom: HashMap<String, Vec<CustomRecipe>> = HashMap::new();
-        let mut meta = HashMap::new();
-        for (name, v) in sources {
+        enum ParsedSourceRecipe {
+            Custom {
+                kind: String,
+                id: String,
+                json: Arc<Value>,
+            },
+            Cooking {
+                cooking: Cooking,
+                meta: (String, (String, String)),
+            },
+            Crafting {
+                name: String,
+                recipe: Recipe,
+                meta: (String, (String, String)),
+            },
+            MetaOnly {
+                meta: (String, (String, String)),
+            },
+        }
+
+        fn parse_recipe_source(name: String, v: Value, items: &Items) -> ParsedSourceRecipe {
             if let Some(kind) = custom_type(&v) {
                 let id = if name.contains(':') {
                     name
@@ -1560,17 +1575,14 @@ impl Recipes {
                 };
                 let kind = kind.to_owned();
                 let json = Arc::new(v);
-                custom
-                    .entry(kind)
-                    .or_default()
-                    .push(CustomRecipe { id, json });
-                continue;
+                return ParsedSourceRecipe::Custom { kind, id, json };
             }
             let text = |k: &str| v[k].as_str().unwrap_or("").to_owned();
-            meta.insert(name.clone(), (text("category"), text("group")));
+            let meta = (name.clone(), (text("category"), text("group")));
             let ing = |k: &str| Ingredient::parse(&v[k], items);
             let result = || Template::parse(&v["result"]);
             let special = |recipe: Option<Special>| recipe.map(Recipe::Special);
+            let mut cooking = None;
             let parsed: Option<Recipe> = match v["type"].as_str().unwrap_or("") {
                 "minecraft:crafting_shaped" => {
                     let pattern: Vec<Vec<char>> = v["pattern"]
@@ -1728,7 +1740,7 @@ impl Recipes {
                 | "minecraft:smoking"
                 | "minecraft:campfire_cooking") => {
                     if let (Some(ingredient), Some(result)) = (ing("ingredient"), result()) {
-                        cooking.push(Cooking {
+                        cooking = Some(Cooking {
                             id: name.clone(),
                             category: text("category"),
                             group: text("group"),
@@ -1743,8 +1755,48 @@ impl Recipes {
                 }
                 _ => None,
             };
-            if let Some(recipe) = parsed {
-                crafting.push((name, recipe));
+            if let Some(cooking) = cooking {
+                ParsedSourceRecipe::Cooking { cooking, meta }
+            } else if let Some(recipe) = parsed {
+                ParsedSourceRecipe::Crafting { name, recipe, meta }
+            } else {
+                ParsedSourceRecipe::MetaOnly { meta }
+            }
+        }
+
+        let parsed_entries = horizon_core::parallel::parallel_map(sources, |(name, v)| {
+            parse_recipe_source(name, v, items)
+        });
+        let mut crafting = Vec::new();
+        let mut cooking = Vec::new();
+        let mut custom: HashMap<String, Vec<CustomRecipe>> = HashMap::new();
+        let mut meta = HashMap::new();
+        for entry in parsed_entries {
+            match entry {
+                ParsedSourceRecipe::Custom { kind, id, json } => {
+                    custom
+                        .entry(kind)
+                        .or_default()
+                        .push(CustomRecipe { id, json });
+                }
+                ParsedSourceRecipe::Cooking {
+                    cooking: c,
+                    meta: (k, m),
+                } => {
+                    meta.insert(k, m);
+                    cooking.push(c);
+                }
+                ParsedSourceRecipe::Crafting {
+                    name,
+                    recipe,
+                    meta: (k, m),
+                } => {
+                    meta.insert(k, m);
+                    crafting.push((name, recipe));
+                }
+                ParsedSourceRecipe::MetaOnly { meta: (k, m) } => {
+                    meta.insert(k, m);
+                }
             }
         }
         let facts = items
@@ -2685,5 +2737,37 @@ mod tests {
     fn dyes_blend_like_dyed_item_color() {
         // One red dye on an undyed item gives the dye's own colour.
         assert_eq!(apply_dyes(None, &[14]), 0xB02E26);
+    }
+
+    #[test]
+    fn parallel_recipe_loading_preserves_deterministic_order() {
+        let root =
+            std::env::temp_dir().join(format!("horizon-parallel-recipes-{}", std::process::id()));
+        let dir = root.join("data/minecraft/recipe");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&dir).unwrap();
+        for i in 0..60 {
+            let json = serde_json::json!({
+                "type": "minecraft:crafting_shapeless",
+                "ingredients": ["minecraft:stick"],
+                "result": {"id": format!("minecraft:item_{i:03}"), "count": 1}
+            });
+            fs::write(dir.join(format!("rec_{i:03}.json")), json.to_string()).unwrap();
+        }
+        let items = Items::for_tests(HashMap::new());
+        let recipes = Recipes::load(&root, &items, &PackOverlay::NONE).unwrap();
+        assert_eq!(recipes.crafting.len(), 60);
+        for (i, (name, recipe)) in recipes.crafting.iter().enumerate() {
+            assert_eq!(name, &format!("rec_{i:03}"));
+            if let Recipe::Shapeless { result, .. } = recipe {
+                assert_eq!(
+                    result.item.as_deref(),
+                    Some(format!("minecraft:item_{i:03}").as_str())
+                );
+            } else {
+                panic!("expected shapeless");
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
     }
 }

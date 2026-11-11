@@ -100,20 +100,18 @@ fn read_tag_dir(dir: &Path) -> HashMap<String, Vec<String>> {
     let Ok(folder) = horizon_world::json_folder::read(dir) else {
         return HashMap::new();
     };
-    folder
-        .files
-        .iter()
-        .filter_map(|file| {
-            let v = serde_json::from_slice::<Value>(file.bytes().ok()?).ok()?;
-            let values = v["values"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|e| e.as_str().or_else(|| e["id"].as_str()).map(str::to_owned))
-                .collect();
-            Some((format!("minecraft:{}", file.name), values))
-        })
-        .collect()
+    horizon_core::parallel::parallel_filter_map_slice(&folder.files, |file| {
+        let v = serde_json::from_slice::<Value>(file.bytes().ok()?).ok()?;
+        let values = v["values"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.as_str().or_else(|| e["id"].as_str()).map(str::to_owned))
+            .collect();
+        Some((format!("minecraft:{}", file.name), values))
+    })
+    .into_iter()
+    .collect()
 }
 /// Expand a tag keeping first-seen order (`TagLoader` builds a linked set).
 fn expand_ordered(
@@ -229,9 +227,9 @@ impl Enchantments {
                 }
             }
         }
-        let tags: HashMap<String, Vec<Arc<str>>> = raw_tags
-            .keys()
-            .map(|k| {
+        let tag_keys: Vec<_> = raw_tags.keys().cloned().collect();
+        let tags: HashMap<String, Vec<Arc<str>>> =
+            horizon_core::parallel::parallel_map_slice(&tag_keys, |k| {
                 let mut v = Vec::new();
                 expand_ordered(k, &raw_tags, &mut v, 0);
                 (
@@ -239,15 +237,17 @@ impl Enchantments {
                     v.into_iter().map(|s| Arc::from(s.as_str())).collect(),
                 )
             })
+            .into_iter()
             .collect();
         let unordered = |raw: HashMap<String, Vec<String>>| -> HashMap<String, HashSet<String>> {
-            raw.keys()
-                .map(|k| {
-                    let mut v = Vec::new();
-                    expand_ordered(k, &raw, &mut v, 0);
-                    (k.clone(), v.into_iter().collect())
-                })
-                .collect()
+            let keys: Vec<_> = raw.keys().cloned().collect();
+            horizon_core::parallel::parallel_map_slice(&keys, |k| {
+                let mut v = Vec::new();
+                expand_ordered(k, &raw, &mut v, 0);
+                (k.clone(), v.into_iter().collect())
+            })
+            .into_iter()
+            .collect()
         };
         let entity_tags = unordered(read_tag_dir(&data.join("tags/entity_type")));
         let damage_tags = match horizon_world::damage_source::Catalog::load(root, overlay) {
@@ -267,18 +267,24 @@ impl Enchantments {
         let mut files: BTreeMap<String, Value> = BTreeMap::new();
         // The folder's own files, not its subfolders'.
         if let Ok(folder) = horizon_world::json_folder::read(&data.join("enchantment")) {
-            for file in folder.files.iter().filter(|f| !f.name.contains('/')) {
-                if let Ok(v) = serde_json::from_slice(file.bytes().unwrap_or_default()) {
-                    files.insert(format!("minecraft:{}", file.name), v);
+            let parsed = horizon_core::parallel::parallel_filter_map_slice(&folder.files, |file| {
+                if file.name.contains('/') {
+                    return None;
                 }
-            }
+                let v = serde_json::from_slice(file.bytes().unwrap_or_default()).ok()?;
+                Some((format!("minecraft:{}", file.name), v))
+            });
+            files.extend(parsed);
         }
         // The active pack's definition replaces the lower sources for this id.
-        for (id, entries) in overlay.kind("enchantment") {
-            if let Ok(v) = serde_json::from_slice(horizon_world::loot::PackOverlay::top(entries)) {
-                files.insert(id.to_owned(), v);
-            }
-        }
+        let overlay_entries: Vec<_> = overlay.kind("enchantment").collect();
+        let pack_enchantments =
+            horizon_core::parallel::parallel_filter_map_slice(&overlay_entries, |(id, entries)| {
+                let v =
+                    serde_json::from_slice(horizon_world::loot::PackOverlay::top(entries)).ok()?;
+                Some(((*id).to_owned(), v))
+            });
+        files.extend(pack_enchantments);
         let lang: HashMap<String, String> =
             horizon_core::prepared_files::read(&root.join("assets/minecraft/lang/en_us.json"))
                 .ok()
