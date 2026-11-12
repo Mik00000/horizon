@@ -247,7 +247,7 @@ mod tests {
     fn worker_limits_preserve_filtered_order_without_overflow() {
         let items: Vec<usize> = (0..9).collect();
         for workers in [0, 1, 2, 4, usize::MAX] {
-            let select = |n: usize| (n % 2 == 0).then_some(n * 3);
+            let select = |n: usize| n.is_multiple_of(2).then_some(n * 3);
             assert_eq!(
                 parallel_filter_map_slice_with_workers(&items, |n| select(*n), workers),
                 [0, 6, 12, 18, 24]
